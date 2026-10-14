@@ -1,0 +1,6 @@
+[build]
+  command = "composer install --no-dev --optimize-autoloader"
+  publish = "netlify/static"
+
+[build.environment]
+  PHP_VERSION = "8.4"
