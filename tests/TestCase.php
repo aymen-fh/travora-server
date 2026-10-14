@@ -1,0 +1,15 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests;
+
+use Database\Seeders\RolePermissionSeeder;
+use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+
+abstract class TestCase extends BaseTestCase
+{
+    protected $seed = true;
+
+    protected $seeder = RolePermissionSeeder::class;
+}

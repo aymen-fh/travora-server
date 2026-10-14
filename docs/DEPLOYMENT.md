@@ -1,0 +1,103 @@
+# Production deployment (Ubuntu)
+
+Stack: Nginx, PHP-FPM 8.3, PostgreSQL 16, Redis, Supervisor, SSL.
+
+## 1. System packages
+
+```bash
+sudo apt update
+sudo apt install -y nginx php8.3-fpm php8.3-cli php8.3-pgsql php8.3-redis \
+  php8.3-mbstring php8.3-xml php8.3-bcmath php8.3-intl php8.3-curl unzip git supervisor
+```
+
+## 2. Application
+
+Deploy `backend/api` to `/var/www/travora`.
+
+```bash
+cd /var/www/travora
+cp .env.example .env
+php artisan key:generate
+# set DB_*, REDIS_*, APP_URL
+# APP_ENV=production
+# APP_DEBUG=false
+php artisan travora:validate-env --strict
+composer install --no-dev --optimize-autoloader
+php artisan migrate --force
+php artisan config:cache
+php artisan route:cache
+php artisan event:cache
+php artisan storage:link
+php artisan travora:health
+```
+
+Never commit `.env`. Do **not** run `db:seed` in production; the seeded admin password is for local/staging only.
+
+Provider credentials are vault references stored encrypted (`secret_reference` cast). Admin APIs return masked metadata only.
+
+## 3. Nginx
+
+Point `root` at `public/`. TLS via Let's Encrypt (`certbot --nginx`). Forward `X-Request-ID` if the proxy generates it.
+
+Liveness: `GET /up`
+
+## 4. Queue workers (Supervisor)
+
+```
+[program:travora-worker]
+command=php /var/www/travora/artisan queue:work redis --sleep=1 --tries=1 --timeout=120
+user=www-data
+numprocs=2
+redirect_stderr=true
+stdout_logfile=/var/log/travora-worker.log
+stopwaitsecs=130
+```
+
+Fulfillment jobs use `$tries = 1` on purpose. Do not raise that without provider-side idempotency.
+
+## 5. Scheduler
+
+```
+* * * * * www-data php /var/www/travora/artisan schedule:run >> /dev/null 2>&1
+```
+
+Registered jobs:
+
+- Provider health checks (5m)
+- Usage sync (15m)
+- Catalog sync (hourly)
+- Expire wallet holds (5m)
+- Sweep stale fulfillments (5m)
+- Expire eSIM profiles (daily)
+- Cleanup provider API logs (daily)
+- Cleanup audit logs (daily)
+
+## 6. PostgreSQL indexes
+
+ERD v2 migrations already index the operational paths used in production:
+
+- orders: `user_id+created_at`, `status`, `payment_status`, `fulfillment_status`, unique `idempotency_key`
+- wallets / holds / transactions: `wallet_id+status`, `expires_at`, unique idempotency keys
+- webhook_events: unique `(provider_id, payload_hash)`, `status+received_at`
+- esim_profiles: `user_id+status`, `expires_at+status`
+- audit_logs: `user_id+created_at`, `entity_type+entity_id`
+- failed_jobs: `connection+queue+failed_at`
+
+Do not add ad-hoc indexes by rewriting locked Phase 2 migrations.
+
+## 7. Rate limits
+
+Configured via `RATE_LIMIT_API` (default 60/min) and `RATE_LIMIT_SENSITIVE` (default 20/min) for money, cancel, sync, retry, and install-adjacent mutations. Auth login remains throttled on the route plus `LoginUser` limiter.
+
+## 8. Logging, audit, credentials
+
+- Laravel logs: `storage/logs/laravel.log` (rotate; do not ship secrets)
+- Correlation: `X-Request-ID`
+- Provider health: Admin + `provider_health_checks`
+- API log retention: `PROVIDER_API_LOG_RETENTION_DAYS` (default 14)
+- Audit retention: `AUDIT_LOG_RETENTION_DAYS` (default 365, floor 30)
+- Credential vault: store only a reference (`secret_reference`), encrypted at rest, masked in HTTP
+
+## 9. Backups and incidents
+
+See [BACKUPS.md](BACKUPS.md) and [RUNBOOKS.md](RUNBOOKS.md).
